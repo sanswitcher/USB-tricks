@@ -1,0 +1,206 @@
+#!/bin/bash -x
+#
+#
+
+# no need log hotplug events for devices rather than scsi_device
+case "$1" in
+   scsi_device)
+      ;;
+   *)
+      exit 0
+esac
+
+CHECK='/sbin/chkconfig'
+
+USBCONFIG=/etc/fabos/usbstorage.conf
+
+HOTPLUGLOG=/var/log/hotplug.log
+HOTPLUGLOG1=/var/log/hotplug.log1
+HOTPLUGLOG_SIZE=`/usr/bin/du "$HOTPLUGLOG" | /usr/bin/cut -f 1`
+
+DBGLOG="/bin/echo"
+SWBD=`/sbin/sin 2>/dev/null | /bin/grep SWBD | /usr/bin/cut -d ' ' -f 2 | /usr/bin/cut -d ',' -f 1`
+
+cmdlog() {
+$DBGLOG $1 $2 $3 $4 $5 $6 $7 $8 $9  >> $HOTPLUGLOG
+}
+
+# Note: This function doesn't support pipe and no return value.
+cmd() {
+$DBGLOG $1 $2 $3 $4 $5 $6 $7 $8 $9  >> $HOTPLUGLOG
+$1 $2 $3 $4 $5 $6 $7 $8 $9 >>  $HOTPLUGLOG
+}
+
+check_usb_vendor() {
+    usb_rootdev=0
+    if [ ! -e "$USBCONFIG" ] ; then
+	$DBGLOG "USB configuration file not found"
+	return 1
+    fi
+
+    # skip platform root device that use USB storage
+    case ${SWBD##SWBD} in
+    141|142|148) usb_rootdev=1 ;;
+    *) ;;
+    esac
+
+    for devfile in /proc/scsi/usb-storage/*
+    do
+        if [ `/bin/basename $devfile` == "0" -a "$usb_rootdev" == "1" ]; then
+            continue	
+        fi
+	
+	# Get the name of vendor plugged in
+	vendor=`/bin/cat "$devfile" | sed -n -e "s/^.\+Vendor: \(.\+\)/\1/gp"`
+	# See if we support this vendor
+	rc=`/bin/cat "$USBCONFIG" | /bin/grep -v "^[ \t]*#" | /bin/grep "VENDOR $vendor" | /usr/bin/wc -l`
+	if [ $rc -gt 0 ] ; then
+	    $DBGLOG "USB Vendor recognized" >> $HOTPLUGLOG
+	    return 0
+	fi
+    done
+    echo "VENDOR $vendor" >> $USBCONFIG
+    $DBGLOG "Unrecognized USB vendor" >> $HOTPLUGLOG
+	
+    return 1
+}
+
+# move hotplug log to backup file
+if [ $HOTPLUGLOG_SIZE -gt 5 ] ; then
+  $DBGLOG LOG SIZE OVERFLOW  = "$HOTPLUGLOG_SIZE" >> $HOTPLUGLOG
+  cp -f "$HOTPLUGLOG" "$HOTPLUGLOG1"
+  rm -f "$HOTPLUGLOG"
+  /bin/echo Hotplug Start > $HOTPLUGLOG
+fi
+
+$DBGLOG Begin SEQNUM = "$SEQNUM" >> $HOTPLUGLOG
+$DBGLOG Log size     = "$HOTPLUGLOG_SIZE" >> $HOTPLUGLOG
+$DBGLOG hotplug      = "$1" >> $HOTPLUGLOG
+$DBGLOG PHYSDEVBUS   = "$PHYSDEVBUS" >> $HOTPLUGLOG
+$DBGLOG ACTION       = "$ACTION" >> $HOTPLUGLOG
+$DBGLOG SUBSYSTEM    = "$SUBSYSTEM" >> $HOTPLUGLOG
+$DBGLOG DEVPATH      = "$DEVPATH" >> $HOTPLUGLOG
+$DBGLOG PHYSDEVDRIVER= "$PHYSDEVDRIVER" >> $HOTPLUGLOG
+
+#cmd /usr/bin/printenv
+
+# FOS USB storage mount point
+USBDIR=/usb/usbstorage
+
+case "$1" in
+     scsi_device)
+     cmd  /fabos/cliexec/errlogtest -i RAS-5007 -a \"device:$1,action:$ACTION\"
+
+     #check device type TBD
+      case "$ACTION" in
+         add)
+	    check_usb_vendor
+	    if [ $? -gt 0 ] ; then
+		$DBGLOG "USB device not supported by Brocade"
+		/fabos/cliexec/errlogtest -i RAS-5007 -a "USB device not supported by Brocade"
+		# The CLI will remove the kernel modules when we return failure
+		exit 1
+	    fi
+
+	    if [ -d "$USBDIR" ] ; then
+		# If USBDIR exists, USB device was removed in an unclean way.
+		$DBGLOG "Dangling kernel modules detected. Clean-up" >> $HOTPLUGLOG
+
+		# Unmount any FS on USBDIR
+		count=0
+		umount_success=0
+		while [ $umount_success -eq 0 ] && [ $count -lt 30 ] ; do
+		     cmd /bin/umount -l "$USBDIR"
+		     cmdlog /bin/grep "$USBDIR" /proc/mounts
+		     /bin/grep "$USBDIR" /proc/mounts
+		     if [ $? -ne 0 ] ; then
+			 umount_success=1
+			 cmd rmdir $USBDIR
+		     else
+		        cmd /bin/sleep  2
+		        # inc count
+		        (( count += 1 ))
+		     fi
+		done
+
+		# Make sure no kernel modules are still stuck there.
+                case ${SWBD##SWBD} in
+                141|142|148)
+		    cmd rm -f /dev/sdb
+		    cmd rm -f /dev/sdb1
+                     ;;
+                *)
+		    cmd rm -f /dev/sda 
+		    cmd rm -f /dev/sda1
+		    cmdlog rmmod usb-storage.ko
+		    rmmod usb-storage.ko
+		    if [ $? -eq 0 ] ; then
+		        hcd_driver=`/bin/lsmod | /usr/bin/cut -f 1 -d " " | /bin/grep "hci_hcd"`
+		        cmd rmmod $hcd_driver
+		        cmd rmmod usbcore.ko 
+		    fi
+                    ;;
+                esac
+	    fi
+	    cmd /bin/mkdir -p "$USBDIR"
+	 ;;
+         remove)
+	     #unexpected un-plug
+	     if [ -d "$USBDIR" ] ; then
+	       cmd /fabos/cliexec/errlogtest -i RAS-3003
+	       count=0
+    	       umount_success=0
+	       #while [ -d "$USBDIR/brocade" ] && [ $count -lt 30 ] ; do
+		while [ $umount_success -eq 0 ] && [ $count -lt 30 ] ; do
+		     cmd /bin/umount -l "$USBDIR"
+		     cmdlog /bin/grep "$USBDIR" /proc/mounts
+		     /bin/grep "$USBDIR" /proc/mounts
+		     if [ $? -ne 0 ] ; then
+		        umount_success=1
+		    	cmd rmdir $USBDIR
+		     else
+		        cmd /bin/sleep  2
+		        # inc count
+		        (( count += 1 ))
+		     fi
+	       done
+	       #make sure USB storage was umounted before remove mount point
+	       if [ -f "$USBDIR/*" ] ; then
+	         #failure indication
+	         /fabos/cliexec/errlogtest -i RAS-5007 -a \"Fail to umount "$USBDIR"\"
+	       fi
+	       case ${SWBD##SWBD} in
+	       #1000|1001|1002)
+	       141|142)
+	          cmd rm -f /dev/sdb
+	          cmd rm -f /dev/sdb1
+	          echo 1-0:1.0 > /sys/bus/usb/drivers/hub/unbind
+	             ;;
+	       148)
+	          cmd rm -f /dev/sdb
+	          cmd rm -f /dev/sdb1
+	          echo 2-0:1.0 > /sys/bus/usb/drivers/hub/unbind 
+	             ;;
+	       *)
+		    cmd rm -f /dev/sda 
+		    cmd rm -f /dev/sda1
+		    cmdlog rmmod usb-storage.ko
+		    rmmod usb-storage.ko
+		    if [ $? -eq 0 ] ; then
+		        hcd_driver=`/bin/lsmod | /usr/bin/cut -f 1 -d " " | /bin/grep "hci_hcd"`
+		        cmd rmmod $hcd_driver
+		        cmd rmmod usbcore.ko 
+		    fi
+                    ;;
+                esac
+	     fi ;;
+      esac
+    ;;
+   *)
+      # unsupported
+      ;;
+esac
+
+$DBGLOG End SEQNUM   = "$SEQNUM" >> $HOTPLUGLOG
+
+exit 0

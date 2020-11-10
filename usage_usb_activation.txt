@@ -1,0 +1,20 @@
+Start usb_activation.sh
+
+Then one can mount an ext3 formatted USB-stick:
+mkdir /usb_ext3
+mount -t ext3 /dev/sda1 /usb_ext3
+ls /usb_ext3/
+
+bin/         dev/     fabos/   libexec@  sbin/           tftpboot/ var/
+boot/        diag@    import/  mnt/      share@          tmp/
+config/      etc/     initrd/  proc/     standby_sbin/   users/
+core_files/  export/  lib/     root/     support_files/  usr/
+
+or
+
+mkdir /usb_vfat
+mount -t vfat /dev/sda1 /usb_vfat
+ls /usb_vfat/
+.Trash-1000/  brocade/  config/  firmware/  firmwarekey/  hda1.dmp* support/
+
+So I can bypass the brocade's usbstorage stuff.
